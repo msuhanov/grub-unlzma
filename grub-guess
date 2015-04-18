@@ -1,0 +1,92 @@
+#!/bin/sh
+
+# Author: Maxim Suhanov
+
+marker="sector sizes of %d bytes aren't supported yet" # A valid core image contains this string.
+lzma_ver='--lzma1'
+lzma_options='dict=65535,lc=3,lp=0,pb=2' # LZMA1/LZMA2 options used in "mkimage.c".
+
+old_dd='no' # When 'yes', there is no iflag=skip_bytes support in dd.
+
+usage()
+{
+	echo 'Usage: grub-guess [--lzma2] <input file>'
+	echo
+	echo 'Compression modes:'
+	echo '  --lzma2: use LZMA2 (XZ) instead of LZMA1'
+	echo
+	echo 'Output: an uncompressed core image is written to stdout,'
+	echo '        other messages go to stderr.'
+	exit 0
+}
+
+fail()
+{
+	[ -n "$1" ] && echo "$1" >&2
+	exit 1
+}
+
+exit_success()
+{
+	[ -n "$1" ] && echo "$1" >&2
+	exit 0
+}
+
+checkdep()
+{
+	command -v "$1" > /dev/null || fail "Command \"$1\" not found!"
+}
+
+checkdd()
+{
+	dd if=/dev/zero of=/dev/null skip=1 count=1 iflag=skip_bytes 2> /dev/null
+	dd_ret=$?
+	[ $dd_ret -eq 0 ] || old_dd='yes'
+}
+
+if [ $# -eq 2 ] && [ "$1" = '--lzma2' ]; then
+	lzma_ver='--lzma2'
+	shift
+fi
+
+[ $# -eq 1 ] && [ -n "$1" ] && [ "$1" != '--lzma2' ] || usage
+[ -e "$1" ] || fail "Input file \"$1\" does not exist!"
+[ -r "$1" ] || fail "Input file \"$1\" has no read permission!"
+
+checkdep "xz"
+checkdep "grep"
+
+# Let's start at zero offset.
+xz --decompress --stdout --format=raw $lzma_ver=$lzma_options "$1" 2> /dev/null | grep -F -q -s "$marker"
+ret=$?
+if [ $ret -eq 0 ]; then
+	xz --decompress --stdout --format=raw $lzma_ver=$lzma_options "$1" 2> /dev/null
+	exit_success "\"$1\" is a compressed core image."
+fi
+
+# Try to guess the right offset. This is slow!
+checkdep "seq"
+checkdep "dd"
+checkdd
+
+if [ "$old_dd" != 'yes' ]; then
+	for offset in `seq 2 2 20000`; do # Skip odd offsets.
+		dd if="$1" skip=$offset iflag=skip_bytes 2> /dev/null | xz --decompress --stdout --format=raw $lzma_ver=$lzma_options 2> /dev/null | grep -F -q -s "$marker"
+		ret=$?
+		if [ $ret -eq 0 ]; then
+			dd if="$1" skip=$offset iflag=skip_bytes 2> /dev/null | xz --decompress --stdout --format=raw $lzma_ver=$lzma_options 2> /dev/null
+			exit_success "Found a compressed core image in \"$1\" at offset $offset bytes."
+		fi
+	done
+else # $old_dd is 'yes'.
+	for offset in `seq 2 2 20000`; do
+		dd if="$1" bs=$offset skip=1 2> /dev/null | xz --decompress --stdout --format=raw $lzma_ver=$lzma_options 2> /dev/null | grep -F -q -s "$marker"
+		ret=$?
+		if [ $ret -eq 0 ]; then
+			dd if="$1" bs=$offset skip=1 2> /dev/null | xz --decompress --stdout --format=raw $lzma_ver=$lzma_options 2> /dev/null
+			exit_success "Found a compressed core image in \"$1\" at offset $offset bytes."
+		fi
+	done
+fi
+
+fail "Nothing was found in \"$1\"!"
